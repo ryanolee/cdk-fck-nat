@@ -184,14 +184,6 @@ export class FckNatInstanceProvider extends ec2.NatProvider implements ec2.IConn
     // TODO: This should get buttoned up to only allow attaching ENIs created by this construct.
     this._role = new iam.Role(options.vpc, 'NatRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      inlinePolicies: {
-        attachNatEniPolicy: new iam.PolicyDocument({
-          statements: [new iam.PolicyStatement({
-            actions: ['ec2:AttachNetworkInterface', 'ec2:ModifyNetworkInterfaceAttribute'],
-            resources: ['*'],
-          })],
-        }),
-      },
     });
 
     if (this.props.enableSsm === undefined || this.props.enableSsm) {
@@ -203,15 +195,9 @@ export class FckNatInstanceProvider extends ec2.NatProvider implements ec2.IConn
       cloudWatchConfigParam?.grantRead(this._role);
     }
 
-    if (this.props.eipPool) {
-      this._role.addToPolicy(new iam.PolicyStatement({
-        actions: ['ec2:AssociateAddress', 'ec2:DisassociateAddress'],
-        resources: ['*'],
-      }));
-    }
-
     this._autoScalingGroups = [];
     const eipPool = this.props.eipPool ? [...this.props.eipPool] : undefined;
+
     for (const sub of options.natSubnets) {
       const networkInterface = new ec2.CfnNetworkInterface(
         sub, 'FckNatInterface', {
@@ -254,6 +240,24 @@ export class FckNatInstanceProvider extends ec2.NatProvider implements ec2.IConn
       // NAT instance routes all traffic, both ways
       this.gateways.add(sub.availabilityZone, networkInterface);
     }
+
+    // Add permissions based on given EIP pool
+    const vpcRegion = options.vpc.stack.region;
+    const vpcAccount = options.vpc.stack.account;
+    
+    if (this.props.eipPool) {
+      this._role.addToPolicy(new iam.PolicyStatement({
+        actions: ['ec2:AssociateAddress', 'ec2:DisassociateAddress'],
+        resources: this.props.eipPool.map((eip) => `arn:aws:ec2:${vpcRegion}:${vpcAccount}:elastic-ip/${eip}`),
+      }));
+    }
+
+    const ENIs = this.gateways.values().map(x => x[1]);
+    this.role.addToPolicy(new iam.PolicyStatement({
+      sid: 'attachNatEniPolicy',
+      actions: ['ec2:AttachNetworkInterface', 'ec2:ModifyNetworkInterfaceAttribute'],
+      resources: ENIs.map(eni => `arn:aws:ec2:${vpcRegion}:${vpcAccount}:network-interface/${eni.attrId}`),
+    }))
 
     // Add routes to them in the private subnets
     for (const sub of options.privateSubnets) {
